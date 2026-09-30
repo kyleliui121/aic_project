@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.pyc
+
+# 数据与产物（体积大，不入库）
+datasets/
+data/
+raw/
+*.pt
+*.onnx
+runs/
+*_aug/
+test_degraded/
+
+# 工具链临时文件
+.zcodeignore
+.DS_Store
+Thumbs.db
+
+# 不入库：演示网页与内部计划
+demo/
+PLAN.md
