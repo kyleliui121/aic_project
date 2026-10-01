@@ -66,6 +66,21 @@ def auto_gamma(img, target=0.45):
     return cv2.LUT(img, table)
 
 
+def local_gamma(img, target=0.45, grid=(8, 6)):
+    """局部自适应 γ（修④混合光照盲区）：分块各自计算提亮曲线再平滑拼接，
+    同一帧里"亮便利店 + 暗路面"可以各得其所。≈ 简易局部色调映射。"""
+    h, w = img.shape[:2]
+    small = cv2.resize(img, grid)
+    means = small.mean(axis=2) / 255.0
+    gmap = np.log(target) / np.log(np.clip(means, 0.02, 0.95))
+    gmap = np.clip(gmap, 0.25, 1.0)
+    gmap[gmap > 0.98] = 1.0                       # 已足够亮的块不动
+    gmap = cv2.resize(gmap, (w, h), interpolation=cv2.INTER_CUBIC)
+    gmap = cv2.GaussianBlur(gmap, (0, 0), w / 16)  # 块间平滑过渡
+    out = np.power(img.astype(np.float32) / 255.0, gmap[..., None])
+    return (np.clip(out, 0, 1) * 255).astype(np.uint8)
+
+
 def gamma_img(img, g):
     table = ((np.linspace(0, 1, 256) ** g) * 255).astype(np.uint8)
     return cv2.LUT(img, table)
@@ -93,32 +108,36 @@ def _ios(a, b):
 
 
 def mef_predict(model, img, min_votes=2):
-    """跨曝光融合 v6（通用数学，不依赖场景）：
-    聚类判定 = IoU>0.45（同位置）或 IoS>0.65（碎片互相包含）；
-    一辆车在低照度下常碎成"车窗框+车身框"，两者 IoU 不够但 IoS 足够；
-    合并后框坐标按置信度加权平均（WBF 思想）。"""
-    per_level = [predict(model, gamma_img(img, g), tta=True) for g in GAMMA_LADDER]
-    allb = sorted([b for lv in per_level for b in lv], key=lambda x: -x[1])
+    """跨曝光融合 v7（复查后的三项优化）：
+    ① 曝光阶梯 = 4档全局γ + 1档局部自适应γ（混合光照同框各得其所）
+    ② TTA 只开在最佳曝光档（γ管曝光、TTA管尺度，二者正交 → 去冗余，前向次数减半）
+    ③ 聚类按位置不看类别，类别取簇内置信度加权多数票（修 car/truck 分裂票）
+    坐标 = 全簇置信度加权平均（WBF）。"""
+    levels = [gamma_img(img, g) for g in GAMMA_LADDER] + [local_gamma(img)]
+    singles = [predict(model, lv) for lv in levels]
+    best = max(range(len(singles)),
+               key=lambda i: sum(b[1] for b in singles[i]))
+    per = list(singles)
+    per[best] = per[best] + predict(model, levels[best], tta=True)
+    allb = sorted([b for lv in per for b in lv], key=lambda x: -x[1])
 
-    def same(c, b):
-        return c[0][0] == b[0] and (_iou(c[0][2], b[2]) > 0.45
-                                    or _ios(c[0][2], b[2]) > 0.65)
+    def same_pos(c, b):
+        return _iou(c[0][2], b[2]) > 0.45 or _ios(c[0][2], b[2]) > 0.65
 
     clusters = []
     for b in allb:
         for c in clusters:
-            if same(c, b):
+            if same_pos(c, b):
                 c.append(b)
                 break
         else:
             clusters.append([b])
-    # 二次归并：聚类中心更新后可能互相包含
     changed = True
     while changed:
         changed = False
         for i in range(len(clusters)):
             for j in range(i + 1, len(clusters)):
-                if same(clusters[i], clusters[j][0]):
+                if same_pos(clusters[i], clusters[j][0]):
                     clusters[i].extend(clusters[j])
                     clusters.pop(j)
                     changed = True
@@ -129,10 +148,14 @@ def mef_predict(model, img, min_votes=2):
     for c in clusters:
         if len(c) < min_votes:
             continue
-        top = c[0]
+        wsum_cls = {}
+        for x in c:
+            wsum_cls[x[0]] = wsum_cls.get(x[0], 0.0) + x[1]
+        cls = max(wsum_cls, key=wsum_cls.get)
+        conf = max(x[1] for x in c if x[0] == cls)
         wsum = sum(x[1] for x in c) or 1.0
         xy = [int(sum(x[2][k] * x[1] for x in c) / wsum) for k in range(4)]
-        out.append((top[0], top[1], xy))
+        out.append((cls, conf, xy))
     return out
 
 
@@ -153,9 +176,11 @@ class TemporalFilter:
     def __init__(self, iou_thr=0.4, min_hits=2, max_age=2):
         self.iou_thr, self.min_hits, self.max_age = iou_thr, min_hits, max_age
         self.tracks = []          # [cls, conf, xy, hits, miss]
+        self.last_match_rate = 1.0   # 时序稳定性：本帧检测中延续自上帧的比例
 
     def update(self, dets):
         unmatched = list(dets)
+        matched = 0
         for t in self.tracks:                     # 贪心 IoU 匹配
             best, best_iou = None, self.iou_thr
             for d in unmatched:
@@ -168,11 +193,14 @@ class TemporalFilter:
                 t[1], t[2] = best[1], best[2]      # 更新置信度与位置
                 t[3] += 1                           # hits
                 t[4] = 0                            # miss 清零
+                matched += 1
             else:
                 t[4] += 1                           # 本帧未出现
         for d in unmatched:                        # 新轨迹
             self.tracks.append([d[0], d[1], d[2], 1, 0])
         self.tracks = [t for t in self.tracks if t[4] <= self.max_age]
+        # 时序稳定性：本帧检测中延续自上帧的比例（忽闪忽现 → 低）
+        self.last_match_rate = matched / len(dets) if dets else 1.0
         return [(t[0], t[1], t[2]) for t in self.tracks if t[3] >= self.min_hits]
 
 
@@ -256,8 +284,8 @@ def main():
                 last_ours = suppress_glare_fp(last_ours, W, H)
             cb = np.mean([b[1] for b in last_base]) if last_base else 0.15
             co = np.mean([b[1] for b in last_ours]) if last_ours else 0.15
-            last_pb = compute_pdi(bright, cb)
-            last_po = compute_pdi(bright, co)
+            last_pb = compute_pdi(bright, cb, tf_base.last_match_rate)
+            last_po = compute_pdi(bright, co, tf_ours.last_match_rate)
         fidx += 1
 
         if args.mode in ("both", "base"):

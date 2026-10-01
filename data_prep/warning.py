@@ -14,10 +14,12 @@ PDI = 亮度漂移分 × 0.55 + 置信度衰减分 × 0.45，0~100，越高越�
 import math
 
 
-def compute_pdi(brightness, conf_mean=None, normal_band=(90, 190)):
+def compute_pdi(brightness, conf_mean=None, stability=None, normal_band=(90, 190)):
     """
     brightness: 当前帧灰度均值 (0~255)
     conf_mean:  当前帧检测置信度均值 (0~1)，None 时只看亮度
+    stability:  时序稳定性(0~1)=当前检测中被上一帧延续下来的比例，
+                检测忽闪忽现说明不可靠（None 时不计入）
     normal_band: 正常亮度区间，越出越扣分
     """
     lo, hi = normal_band
@@ -31,8 +33,12 @@ def compute_pdi(brightness, conf_mean=None, normal_band=(90, 190)):
     if conf_mean is not None:
         # 置信度 0.5 以上视为健康，线性衰减到 0
         c_score = max(0.0, min(1.0, (0.5 - conf_mean) / 0.5))
-    pdi = 100 * (0.55 * b_score + (0.45 if conf_mean is not None else 0.0) * c_score)
-    if conf_mean is None:
+    if conf_mean is not None and stability is not None:
+        s_score = 1.0 - max(0.0, min(1.0, stability))
+        pdi = 100 * (0.50 * b_score + 0.35 * c_score + 0.15 * s_score)
+    elif conf_mean is not None:
+        pdi = 100 * (0.55 * b_score + 0.45 * c_score)
+    else:
         pdi = 100 * b_score          # 无检测信息时退化为纯亮度指标
     return round(min(pdi, 100.0), 1)
 
