@@ -53,12 +53,22 @@ import cv2
 import numpy as np
 
 # 每级固定参数：{等级: (gamma, brightness, noise_sigma)}
+# dark 方向 = 进隧道/地库（AE未及反应，画面欠曝）
 LEVELS = {
     "L1": (1.35, 0.85, 3),
     "L2": (1.80, 0.65, 6),
     "L3": (2.40, 0.45, 10),
     "L4": (3.00, 0.30, 15),
 }
+# bright 方向 = 出隧道"白洞"（AE过冲，画面过曝），gamma<1 提亮
+LEVELS_BRIGHT = {
+    "L1": (0.85, 1.20, 2),
+    "L2": (0.70, 1.40, 1),
+    "L3": (0.58, 1.62, 1),
+    "L4": (0.48, 1.85, 0),
+}
+# 运动模糊核（像素）：模拟 AE 拉长曝光时间的拖影，越暗曝光越长
+BLUR_KERNEL = {"L1": 3, "L2": 5, "L3": 7, "L4": 9}
 
 IMG_EXTS = (".jpg", ".jpeg", ".png", ".bmp", ".webp")
 
@@ -113,6 +123,10 @@ def main():
     ap.add_argument("--count", type=int, default=1, help="random 模式下每张图生成几份")
     ap.add_argument("--seed", type=int, default=42, help="随机种子（保证可复现）")
     ap.add_argument("--skip-l0", action="store_true", help="不复制原图（原图本身即 L0）")
+    ap.add_argument("--direction", choices=["dark", "bright"], default="dark",
+                    help="dark=进隧道欠曝（默认）；bright=出隧道白洞过曝")
+    ap.add_argument("--blur", action="store_true",
+                    help="叠加运动模糊（模拟AE拉长曝光的拖影，随等级增强）")
     ap.add_argument("--quality", type=int, default=95, help="输出 jpg 质量")
     args = ap.parse_args()
 
@@ -139,7 +153,9 @@ def main():
 
     if args.mode == "fixed":
         # 受控五档：同等级所有图片用同一组参数 → 可复现基准
-        for lv, (g, b, n) in LEVELS.items():
+        table = LEVELS_BRIGHT if args.direction == "bright" else LEVELS
+        for lv, (g, b, n) in table.items():
+            blur_k = BLUR_KERNEL[lv] if args.blur else 0
             dst = os.path.join(args.out_dir, lv, "images")
             os.makedirs(dst, exist_ok=True)
             copy_labels(img_dir, files, label_dir, os.path.join(args.out_dir, lv), set())
@@ -150,6 +166,8 @@ def main():
                     print("  [跳过] 读取失败: %s" % f)
                     continue
                 out = degrade(img, g, b, n, rng=np.random.default_rng(args.seed))
+                if blur_k > 1:
+                    out = cv2.blur(out, (blur_k, blur_k))
                 cv2.imwrite(os.path.join(dst, f), out,
                             [cv2.IMWRITE_JPEG_QUALITY, args.quality])
                 bright_sum += float(out.mean())

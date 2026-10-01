@@ -20,3 +20,6 @@ Thumbs.db
 # 不入库：演示网页与内部计划
 demo/
 PLAN.md
+docs/
+explore/
+report/

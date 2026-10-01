@@ -1,59 +1,90 @@
-# data_prep · 数据预处理工具
+# data_prep · 数据与部署工具包
+
+## 工具一览
+
+| 脚本 | 用途 | 状态 |
+|---|---|---|
+| `degrade_light.py` | 受控光照退化生成器（进隧道欠曝/出隧道过曝/运动模糊） | ✅ 实测 |
+| `warning.py` | 感知降级指数 PDI（四等级预警，可逐帧计算） | ✅ 实测 |
+| `extract_frames.py` | 自采视频按亮度分档抽帧 + 明暗突变帧自动检出 | ✅ 实测 |
+| `video_detect.py` | 视频检测演示（双画面：基线 vs MEF 零训练优化，叠加 PDI 预警） | ✅ 实测 |
+| `bdd_to_yolo.py` | BDD100K 标注转 YOLO 格式 + 白天/夜晚切分 | ⏸ 未测试（训练路线启用时再验） |
+
+依赖：`pip install ultralytics opencv-python numpy -i https://pypi.tuna.tsinghua.edu.cn/simple`
+
+---
 
 ## degrade_light.py — 受控光照退化生成器
 
-把正常光照图片批量压暗成 **L0~L4 五个等级**，用于构造"光照等级-精度"曲线的受控测试集（也可离线生成暗光训练增强，备选）。
-
-### 安装依赖（一次性）
+模拟车载相机自动曝光（AE）在明暗突变场景的三种失效，生成 L0~L4 五级受控测试集。
 
 ```bash
-pip install opencv-python numpy -i https://pypi.tuna.tsinghua.edu.cn/simple
+# 进隧道方向（欠曝，默认）
+python degrade_light.py --in val/images --labels val/labels --out test_dark --skip-l0
+
+# 出隧道方向（过曝"白洞"）
+python degrade_light.py --in val/images --labels val/labels --out test_bright --skip-l0 --direction bright
+
+# 叠加长曝光运动模糊（AE 拉长曝光的拖影，随等级增强）
+python degrade_light.py --in val/images --labels val/labels --out test_real --skip-l0 --blur
+
+# 离线随机暗光训练增强（备选；训练侧优先在线增强）
+python degrade_light.py --in train/images --labels train/labels --out train_aug --mode random --count 3
 ```
 
-### 常用命令
+等级参数（固定→可复现；亮度跨度参考 CIE 88 隧道入口过渡量级）：
+
+| 等级 | dark 方向 γ/亮度 | bright 方向 γ/亮度 | 模糊核 |
+|---|---|---|---|
+| L1 轻度 | 1.35 / 0.85 | 0.85 / 1.20 | 3px |
+| L2 中度 | 1.80 / 0.65 | 0.70 / 1.40 | 5px |
+| L3 重度 | 2.40 / 0.45 | 0.58 / 1.62 | 7px |
+| L4 近全黑 | 3.00 / 0.30 | 0.48 / 1.85 | 9px |
+
+标签（YOLO txt）原样复制到每级——退化不改框位置，标注零成本继承。
+
+## warning.py — 感知降级指数 PDI
+
+```python
+from warning import compute_pdi, advise
+pdi = compute_pdi(brightness=灰度均值0_255, conf_mean=检测置信度均值)  # 0~100
+level, msg = advise(pdi)   # 正常/关注/降级/严重 + 驾驶建议
+```
+公式：`PDI = 100×(0.55×亮度漂移分 + 0.45×置信度衰减分)`，阈值 30/55/75，可按实车标定调整。
+
+## extract_frames.py — 自采视频抽帧
 
 ```bash
-# 场景1：把白天验证集压成五档受控测试集（报告核心实验用）
-python degrade_light.py --in 白天val/images --labels 白天val/labels --out test_degraded
+python extract_frames.py --video diku1.mp4 --out frames_diku1 --per-band 50
+```
+按亮度三分位分 bright/mid/dark 三档抽帧；自动输出 `transitions.csv`（亮度变化率 Top-K 帧）
+——进/出地库的关键帧，标注优先做这些。
 
-# 场景2：原图本身就是 L0，只生成暗的四档（省一遍拷贝）
-python degrade_light.py --in 白天val/images --labels 白天val/labels --out test_degraded --skip-l0
+## video_detect.py — 视频检测演示
 
-# 场景3：给训练集离线造 3 倍随机暗光增强（备选；训练侧优先用 ultralytics 在线增强）
-python degrade_light.py --in train/images --labels train/labels --out train_aug --mode random --count 3 --seed 42
+```bash
+# 双画面对比（上=基线，下=MEF4+TTA），每帧叠加 PDI 预警横幅
+python video_detect.py --video diku1.mp4 --out diku1_both.mp4 --mode both
+python video_detect.py --video ... --mode ours --every 3   # 长 video 提速
 ```
 
-### 输出结构
+实时性基准（笔记本 CPU，1280×800）：自适应γ+单次 28ms（≈36FPS，实时档）；γ+TTA 61ms；MEF4+TTA 245ms（离线档）。
+
+## bdd_to_yolo.py — BDD 转换（训练路线启用时使用）
+
+```bash
+python bdd_to_yolo.py --labels det_train.json --images bdd_images/ --out ../datasets
+```
+按 timeofday 属性切分白天/夜晚，各自独立 train/val 划分（防训练-测试污染），自动生成
+ultralytics yaml 与切分统计报告。**注意：尚未在真实 BDD 数据上测试。**
+
+---
+
+## 与流水线的关系
 
 ```
-test_degraded/
-├─ L0/images/*.jpg + L0/labels/*.txt   ← 原图（--skip-l0 时无此层）
-├─ L1/images/...                        ← 轻度衰减
-├─ L2/...                               ← 中度衰减
-├─ L3/...                               ← 重度衰减
-└─ L4/...                               ← 近全黑
-```
-
-标签（YOLO txt）**原样复制**到每个等级——压暗不改变框的位置，所以标注零成本继承。
-评测时把每个等级目录分别喂给 `yolo val` 即可得到五档精度，连成曲线。
-
-### 等级参数（固定 → 可复现，写报告可直接引用）
-
-| 等级 | 名称 | gamma | 亮度系数 | 噪声σ | 对应场景 |
-|---|---|---|---|---|---|
-| L0 | 正常照明 | — | — | — | 原图 |
-| L1 | 轻度衰减 | 1.35 | 0.85 | 3 | 阴天/傍晚 |
-| L2 | 中度衰减 | 1.80 | 0.65 | 6 | 地库入口 |
-| L3 | 重度衰减 | 2.40 | 0.45 | 10 | 隧道深处 |
-| L4 | 近全黑 | 3.00 | 0.30 | 15 | 无照明路段 |
-
-> random 模式参数范围：gamma∈[1.3,3.0]，亮度∈[0.40,0.90]，噪声∈[3,12]，`--seed` 保证可复现。
-
-### 与整条流水线的关系
-
-```
-BDD白天图 → [本脚本 L0-L4] → 受控测试集 ──┐
-                                           ├→ yolo val 各档评测 → 光照-精度曲线 → 报告
-自采地库帧 → 人工标注 → 真实暗光测试集 ───┘
-                                           └→ 检测结果 → demo/scripts/convert_yolo_to_demo.py → 演示网页
+自采视频 ──extract_frames──► 关键帧 ──人工标注──► 真实测试场 ─┐
+白天图 ──degrade_light──► 受控测试集 L0~L4 ──────────────────┼─► 评测（experiments/eval_matrix.py）
+                                                             └─► 演示（video_detect / 网页）
+每帧 ──warning.compute_pdi──► 预警输出（四层链路第④层）
 ```
