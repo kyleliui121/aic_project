@@ -60,20 +60,24 @@ def predict(model, img, tta=False):
     return out
 
 
-def mef_predict(model, img):
-    allb = []
-    for g in GAMMA_LADDER:
-        allb += predict(model, gamma_img(img, g), tta=True)
-    allb.sort(key=lambda x: -x[1])
-    keep = []
+def mef_predict(model, img, min_votes=2):
+    """跨档投票融合：目标须在 ≥min_votes 档曝光中同时出现才保留。
+    车灯照出的树影等幻觉误检通常只在单档闪现，会被投票过滤；
+    真实目标跨档稳定，得以保留。min_votes=1 退化为旧的并集模式。"""
+    per_level = [predict(model, gamma_img(img, g), tta=True) for g in GAMMA_LADDER]
+    allb = sorted([b for lv in per_level for b in lv], key=lambda x: -x[1])
+    clusters = []   # [box, votes]
     for b in allb:
-        _, _, xy = b
-        dup = any(
-            abs(min(k[2][2], xy[2]) - max(k[2][0], xy[0])) > 0 and
-            _iou(k[2], xy) > 0.45 for k in keep)
-        if not dup:
-            keep.append(b)
-    return keep
+        hit = None
+        for c in clusters:
+            if c[0][0] == b[0] and _iou(c[0][2], b[2]) > 0.45:
+                hit = c
+                break
+        if hit:
+            hit[1] += 1
+        else:
+            clusters.append([b, 1])
+    return [c[0] for c in clusters if c[1] >= min_votes]
 
 
 def _iou(a, b):
