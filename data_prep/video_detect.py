@@ -34,6 +34,28 @@ CARE = {"car", "person", "truck", "bus", "bicycle", "motorcycle", "traffic light
 GAMMA_LADDER = [1.0, 0.7, 0.45, 0.3]
 
 
+# 路面眩光/倒影抑制的几何先验阈值（可按相机视角调）
+GLARE_ASPECT = 2.2      # car 框宽高比超过此值且低置信 → 视为反光斑
+GLARE_Y = 0.78          # 框中心低于画面此比例 AND 框高 < GLARE_H → 近场路面目标
+GLARE_H = 0.18
+
+
+def suppress_glare_fp(dets, W, H):
+    """几何先验抑制湿地反光/眩光误检：
+    反光斑特征 = 横向拉长 或 贴近场路面的小框；真车（含远处车）不满足。"""
+    keep = []
+    for name, conf, xy in dets:
+        x1, y1, x2, y2 = xy
+        w, h = (x2 - x1) / W, (y2 - y1) / H
+        cy = ((y1 + y2) / 2) / H
+        if name == "car" and w / max(h, 1e-3) > GLARE_ASPECT and conf < 0.55:
+            continue
+        if cy > GLARE_Y and h < GLARE_H and conf < 0.60:
+            continue
+        keep.append((name, conf, xy))
+    return keep
+
+
 def auto_gamma(img, target=0.45):
     mean = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY).mean() / 255.0
     if mean >= 0.45:
@@ -151,8 +173,11 @@ def main():
     ap.add_argument("--out", required=True)
     ap.add_argument("--mode", choices=["both", "ours", "base"], default="both")
     ap.add_argument("--every", type=int, default=1)
+    ap.add_argument("--start-sec", type=float, default=0, help="从视频第几秒开始（跳着测小段用）")
+    ap.add_argument("--duration", type=float, default=0, help="只处理多少秒（0=到结尾）")
     ap.add_argument("--min-hits", type=int, default=2,
                     help="时序过滤：目标须连续出现N个处理帧才显示（1=关闭）")
+    ap.add_argument("--no-glare", action="store_true", help="关闭湿地反光/眩光几何抑制")
     ap.add_argument("--max-frames", type=int, default=0)
     ap.add_argument("--show", action="store_true")
     args = ap.parse_args()
@@ -167,6 +192,9 @@ def main():
     fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
     W = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     H = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    if args.start_sec > 0:
+        cap.set(cv2.CAP_PROP_POS_MSEC, args.start_sec * 1000)
+    end_frame = int(args.duration * fps) if args.duration > 0 else 0
 
     n_out = 1 if args.mode in ("ours", "base") else 2
     vw = cv2.VideoWriter(args.out, cv2.VideoWriter_fourcc(*"mp4v"), fps,
@@ -179,7 +207,8 @@ def main():
     tf_ours = TemporalFilter(min_hits=args.min_hits)
     while True:
         ok, frame = cap.read()
-        if not ok or (args.max_frames and fidx >= args.max_frames):
+        if not ok or (args.max_frames and fidx >= args.max_frames) \
+                or (end_frame and fidx >= end_frame):
             break
         if fidx % args.every == 0:
             bright = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY).mean()
@@ -188,6 +217,9 @@ def main():
             if args.min_hits > 1:                 # 时序一致性过滤（基线与本方法都过滤）
                 last_base = tf_base.update(last_base)
                 last_ours = tf_ours.update(last_ours)
+            if not args.no_glare:                 # 几何先验：湿地反光/眩光抑制
+                last_base = suppress_glare_fp(last_base, W, H)
+                last_ours = suppress_glare_fp(last_ours, W, H)
             cb = np.mean([b[1] for b in last_base]) if last_base else 0.15
             co = np.mean([b[1] for b in last_ours]) if last_ours else 0.15
             last_pb = compute_pdi(bright, cb)
