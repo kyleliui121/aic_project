@@ -18,6 +18,7 @@
   --show        处理时弹窗预览
 """
 import argparse
+import json
 import os
 import sys
 
@@ -57,58 +58,107 @@ def suppress_glare_fp(dets, W, H):
 
 
 class StaticSceneryFilter:
-    """行为特征过滤（第四层）：区分"会动的人"与"不动的景物"。
-    真实行人在画面内存在自身运动（肢体/位移）；静止相机下树干、立柱等
-    景物框内像素几乎不变。仅当相机整体静止时启用评估；相机运动时自动
-    跳过（全局运动与局部运动无法区分）。当前只作用于 person 类。"""
+    """行为过滤 v2（第四层）：轨迹累积证据 + 景物区域黑名单。
+    阈值振荡的幻觉框会间歇出现——逐帧过滤会被"消失一帧"重置证据，
+    因此证据累积后晋升为全片记忆的区域黑名单，命中即抑制；
+    抑制时附带当帧内部运动校验，避免误伤从树前经过的真人。
+    相机整体运动时清空全部记忆（全局运动下证据失效）。仅作用于 person 类。"""
 
-    def __init__(self, iou_thr=0.80, min_age=6, energy_thr=2.5, global_thr=3.5):
+    def __init__(self, iou_thr=0.6, min_age=4, energy_thr=2.5,
+                 pan_thr=8.0, expand=0.20, miss_ttl=2):
         self.iou_thr, self.min_age = iou_thr, min_age
-        self.energy_thr, self.global_thr = energy_thr, global_thr
+        self.energy_thr, self.pan_thr = energy_thr, pan_thr
+        self.expand, self.miss_ttl = expand, miss_ttl
         self.prev_gray = None
-        self.tracks = []   # [cls, conf, xy, energy_sum, count]
+        self.tracks = []   # [cls, conf, xy, energy_sum, count, miss]
+        self.regions = []  # 膨胀后的景物区域框
+
+    def _interior_energy(self, xy, prev, cur):
+        x1, y1, x2, y2 = xy
+        m = 0.2
+        ix1, iy1 = int(x1 + (x2 - x1) * m), int(y1 + (y2 - y1) * m)
+        ix2, iy2 = int(x2 - (x2 - x1) * m), int(y2 - (y2 - y1) * m)
+        H, W = cur.shape
+        ix1, iy1 = max(ix1, 0), max(iy1, 0)
+        ix2, iy2 = min(ix2, W), min(iy2, H)
+        if ix2 - ix1 < 4 or iy2 - iy1 < 4:
+            return None
+        return float(np.abs(cur[iy1:iy2, ix1:ix2].astype(np.int16) -
+                            prev[iy1:iy2, ix1:ix2].astype(np.int16)).mean())
+
+    def _expand_box(self, xy, W, H):
+        x1, y1, x2, y2 = xy
+        ex, ey = (x2 - x1) * self.expand, (y2 - y1) * self.expand
+        return [max(0, x1 - ex), max(0, y1 - ey), min(W, x2 + ex), min(H, y2 + ey)]
 
     def update(self, dets, gray):
         if self.prev_gray is None:
             self.prev_gray = gray
-            return dets, []
-        gdiff = float(np.abs(gray.astype(np.int16) -
-                             self.prev_gray.astype(np.int16)).mean())
+            return dets
+        # 相机平移检测：phase correlation（车流等场景运动不产生全局平移，
+        # 不会误触发；只有相机真正晃动/平移才清空记忆）
+        (dx, dy), _ = cv2.phaseCorrelate(self.prev_gray.astype(np.float32),
+                                         gray.astype(np.float32))
+        prev = self.prev_gray
         self.prev_gray = gray
-        if gdiff > self.global_thr:          # 相机在动 → 无法评估，全部放行
-            self.tracks = []
-            return dets, []
+        if abs(dx) + abs(dy) > self.pan_thr:   # 相机真实平移 → 证据失效
+            self.tracks, self.regions = [], []
+            return dets
 
-        scenery = []
+        # 阶段1：轨迹匹配与证据累积（容忍 miss_ttl 帧短暂消失）
         unmatched = list(dets)
-        new_tracks = []
+        kept_tracks = []
         for t in self.tracks:
-            best, best_iou = None, self.iou_thr
+            best, bi = None, self.iou_thr
             for d in unmatched:
-                if d[0] == t[0] and d[0] == "person":
+                if d[0] == "person" and d[0] == t[0]:
                     v = _iou(d[2], t[2])
-                    if v > best_iou:
-                        best, best_iou = d, v
+                    if v > bi:
+                        best, bi = d, v
             if best is not None:
                 unmatched.remove(best)
-                x1, y1, x2, y2 = best[2]
-                m = 0.2                       # 收缩 20% 只看框内部（自身运动）
-                ix1, iy1 = int(x1 + (x2 - x1) * m), int(y1 + (y2 - y1) * m)
-                ix2, iy2 = int(x2 - (x2 - x1) * m), int(y2 - (y2 - y1) * m)
-                if ix2 > ix1 and iy2 > iy1:
-                    e = float(np.abs(gray[iy1:iy2, ix1:ix2].astype(np.int16) -
-                                     self.prev_gray[iy1:iy2, ix1:ix2].astype(np.int16)).mean())
+                e = self._interior_energy(best[2], prev, gray) or 0.0
+                cnt = t[4] + 1
+                esum = t[3] + e
+                if cnt >= self.min_age and esum / cnt < self.energy_thr:
+                    r = self._expand_box(best[2], gray.shape[1], gray.shape[0])
+                    if not any(_iou(r, x) > 0.5 for x in self.regions):
+                        self.regions.append(r)     # 阶段2：晋升为黑名单区域
                 else:
-                    e = 0.0
-                new_tracks.append([best[0], best[1], best[2],
-                                   t[3] + e, t[4] + 1])
-                if t[4] + 1 >= self.min_age and (t[3] + e) / (t[4] + 1) < self.energy_thr:
-                    scenery.append(best)
-        for d in unmatched:                   # 新轨迹从零累积
-            new_tracks.append([d[0], d[1], d[2], 0.0, 0])
-        self.tracks = new_tracks[-40:]
-        scenery_ids = {id(s) for s in scenery}
-        return [d for d in dets if not any(d is s for s in scenery)], scenery
+                    kept_tracks.append([best[0], best[1], best[2], esum, cnt, 0])
+            elif t[5] + 1 <= self.miss_ttl:
+                kept_tracks.append([t[0], t[1], t[2], t[3], t[4], t[5] + 1])
+        for d in unmatched:
+            if d[0] == "person":
+                kept_tracks.append([d[0], d[1], d[2], 0.0, 0, 0])
+        self.tracks = kept_tracks[-30:]
+
+        # 阶段3：黑名单抑制（附当帧运动校验，防误伤树前经过的真人）
+        kept = []
+        for d in dets:
+            if d[0] == "person" and self.regions:
+                cx, cy = (d[2][0] + d[2][2]) / 2, (d[2][1] + d[2][3]) / 2
+                for r in self.regions:
+                    if r[0] <= cx <= r[2] and r[1] <= cy <= r[3]:
+                        e = self._interior_energy(d[2], prev, gray)
+                        if e is None or e < self.energy_thr * 1.6:
+                            d = None
+                        break
+            if d:
+                kept.append(d)
+        return kept
+
+
+    def save(self, path):
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(self.regions, f)
+
+    def load(self, path):
+        if os.path.isfile(path):
+            with open(path, "r", encoding="utf-8") as f:
+                self.regions = json.load(f)
+            return True
+        return False
 
 
 def auto_gamma(img, target=0.45):
@@ -238,6 +288,8 @@ def main():
                     help="时序过滤：目标须连续出现N个处理帧才显示（1=关闭）")
     ap.add_argument("--no-glare", action="store_true", help="关闭湿地反光/眩光几何抑制")
     ap.add_argument("--no-motion", action="store_true", help="关闭静止景物行为过滤")
+    ap.add_argument("--regions", default=None,
+                    help="景物黑名单缓存文件：存在则加载（跳过冷启动），结束后保存")
     ap.add_argument("--max-frames", type=int, default=0)
     ap.add_argument("--show", action="store_true")
     args = ap.parse_args()
@@ -268,6 +320,9 @@ def main():
     tf_ours = TemporalFilter(min_hits=args.min_hits)
     sf_base = StaticSceneryFilter()
     sf_ours = StaticSceneryFilter()
+    if args.regions and sf_base.load(args.regions):
+        sf_ours.load(args.regions)
+        print("已加载景物黑名单 %d 个区域（跳过冷启动）" % len(sf_ours.regions))
     while True:
         ok, frame = cap.read()
         if not ok or (args.max_frames and fidx >= args.max_frames) \
@@ -285,8 +340,8 @@ def main():
                 last_ours = suppress_glare_fp(last_ours, W, H)
             if args.motion_filter:                # 行为过滤：静止景物(树干) vs 真人
                 gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-                last_base, sb = sf_base.update(last_base, gray)
-                last_ours, so = sf_ours.update(last_ours, gray)
+                last_base = sf_base.update(last_base, gray)
+                last_ours = sf_ours.update(last_ours, gray)
             cb = np.mean([b[1] for b in last_base]) if last_base else 0.15
             co = np.mean([b[1] for b in last_ours]) if last_ours else 0.15
             last_pb = compute_pdi(bright, cb)
@@ -309,6 +364,12 @@ def main():
             if cv2.waitKey(1) == 27:
                 break
     cap.release(); vw.release()
+    if args.regions:                     # 保存本次学到的景物黑名单（下次冷启动即生效）
+        merged = sf_ours.regions + [r for r in sf_base.regions
+                                    if not any(_iou(r, x) > 0.5 for x in sf_ours.regions)]
+        with open(args.regions, "w", encoding="utf-8") as f:
+            json.dump(merged, f)
+        print("景物黑名单已保存: %s（%d 个区域）" % (args.regions, len(merged)))
     if args.show:
         cv2.destroyAllWindows()
     print("完成: %s (%d 帧)" % (args.out, done))
