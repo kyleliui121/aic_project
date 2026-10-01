@@ -89,6 +89,37 @@ def _iou(a, b):
     return inter / max(s1 + s2 - inter, 1)
 
 
+class TemporalFilter:
+    """时序一致性过滤（文献中的多帧持续性检查）：
+    目标须连续 min_hits 个处理帧出现才显示；可容忍 max_age 帧短暂消失。
+    车灯树影等闪现误检无法连续出现 → 被过滤；真实车辆持续在画面中 → 保留。"""
+
+    def __init__(self, iou_thr=0.4, min_hits=2, max_age=2):
+        self.iou_thr, self.min_hits, self.max_age = iou_thr, min_hits, max_age
+        self.tracks = []          # [cls, conf, xy, hits, miss]
+
+    def update(self, dets):
+        unmatched = list(dets)
+        for t in self.tracks:                     # 贪心 IoU 匹配
+            best, best_iou = None, self.iou_thr
+            for d in unmatched:
+                if d[0] == t[0]:
+                    v = _iou(d[2], t[2])
+                    if v > best_iou:
+                        best, best_iou = d, v
+            if best is not None:
+                unmatched.remove(best)
+                t[1], t[2] = best[1], best[2]      # 更新置信度与位置
+                t[3] += 1                           # hits
+                t[4] = 0                            # miss 清零
+            else:
+                t[4] += 1                           # 本帧未出现
+        for d in unmatched:                        # 新轨迹
+            self.tracks.append([d[0], d[1], d[2], 1, 0])
+        self.tracks = [t for t in self.tracks if t[4] <= self.max_age]
+        return [(t[0], t[1], t[2]) for t in self.tracks if t[3] >= self.min_hits]
+
+
 def draw(img, boxes, color):
     for name, conf, xy in boxes:
         cv2.rectangle(img, (xy[0], xy[1]), (xy[2], xy[3]), color, 2)
@@ -120,6 +151,8 @@ def main():
     ap.add_argument("--out", required=True)
     ap.add_argument("--mode", choices=["both", "ours", "base"], default="both")
     ap.add_argument("--every", type=int, default=1)
+    ap.add_argument("--min-hits", type=int, default=2,
+                    help="时序过滤：目标须连续出现N个处理帧才显示（1=关闭）")
     ap.add_argument("--max-frames", type=int, default=0)
     ap.add_argument("--show", action="store_true")
     args = ap.parse_args()
@@ -142,6 +175,8 @@ def main():
 
     fidx, done = 0, 0
     last_base, last_ours, last_pb, last_po = [], [], 0, 0
+    tf_base = TemporalFilter(min_hits=args.min_hits)
+    tf_ours = TemporalFilter(min_hits=args.min_hits)
     while True:
         ok, frame = cap.read()
         if not ok or (args.max_frames and fidx >= args.max_frames):
@@ -150,6 +185,9 @@ def main():
             bright = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY).mean()
             last_base = predict(model, frame)
             last_ours = mef_predict(model, frame) if args.mode != "base" else last_base
+            if args.min_hits > 1:                 # 时序一致性过滤（基线与本方法都过滤）
+                last_base = tf_base.update(last_base)
+                last_ours = tf_ours.update(last_ours)
             cb = np.mean([b[1] for b in last_base]) if last_base else 0.15
             co = np.mean([b[1] for b in last_ours]) if last_ours else 0.15
             last_pb = compute_pdi(bright, cb)
