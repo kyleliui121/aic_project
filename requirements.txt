@@ -11,5 +11,4 @@ addict
 simplejson
 einops
 
-# 训练侧依赖（上云训练用；AutoDL PyTorch 镜像已自带 torch/cuda，无需再装）
-# 本地 CPU 也可跑通全流程，只是训练慢
+# 训练侧依赖（本地 RTX 5060 训练机用；注意 50 系卡需 cu128 版 torch，见 TRAINING.md §0）

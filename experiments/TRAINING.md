@@ -5,9 +5,9 @@
 
 ---
 
-## 0. 环境（本地 N 卡 或 AutoDL，二选一）
+## 0. 环境（本地 NVIDIA 显卡）
 
-### 0a. 本地 NVIDIA 显卡（队内有 RTX 5060 ✅，零费用）
+### 本地 RTX 5060（队内训练机，零费用）
 
 ⚠️ **50 系卡（Blackwell 架构）必读**：必须装 CUDA 12.8 版 PyTorch（2.7 以上），
 旧版 torch 会报 `no kernel image is available for execution on the device`。
@@ -26,11 +26,6 @@ python -c "import torch; x=torch.randn(8,8).cuda(); print('GPU计算测试:', (x
 - 5060（8GB 显存）跑 yolo11n：batch 16、imgsz 640，显存占用约 3~4GB，**余量充足**
 - 速度预期：B0 一次训练约 40~60 分钟；显存富余可开 batch=32 提速
 - 显卡空闲时也可顺手跑 yolo11s 加一行消融（奖励项）
-
-### 0b. AutoDL 备用（仅当本地卡不能用）
-
-租 RTX 3090（数据盘 50GB+），镜像选 **PyTorch 2.x + CUDA 12.x + Python 3.10**，
-费用预估见 §5。以下命令两套环境**一字不改通用**。
 
 ## 1. 数据下载（国内直连，已实测 ✅）
 
@@ -159,16 +154,12 @@ python experiments/eval_matrix.py \
 python demo/scripts/make_demo_data.py   # 用真实检测结果替换占位框（内含 MEF 管线）
 ```
 
-## 5. 费用与时长预估
+## 5. 时长预估（本地 RTX 5060）
 
-**本地 RTX 5060 方案（当前采用）：费用 0 元**，B0~B3 + ALT + LA-PP + 评测约 10~12 小时（可分多次跑，训练结果自动保存在 runs/ 下）。
-
-AutoDL 备用方案（3090）如需启用：
-
-| 步骤 | 时长 | 费用 |
-|---|---|---|
-| B0~B3 四次训练 | 4×1h | ≈6元 |
-| ALT 搜索+重训 | 2~3h | ≈4元 |
-| LA-PP | 1~2h | ≈3元 |
-| 评测矩阵 | 1h | ≈1.5元 |
-| **合计** | **~10 GPU时** | **≈15元** |
+| 步骤 | 时长 |
+|---|---|
+| B0~B3 四次训练 | 4×40~60min |
+| ALT 搜索+重训 | 2~3h |
+| LA-PP | 1~2h |
+| 评测矩阵 | ~1h |
+| **合计** | **约 10~12 小时（可分多次跑，结果自动存 runs/）** |
