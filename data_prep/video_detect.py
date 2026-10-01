@@ -56,6 +56,61 @@ def suppress_glare_fp(dets, W, H):
     return keep
 
 
+class StaticSceneryFilter:
+    """行为特征过滤（第四层）：区分"会动的人"与"不动的景物"。
+    真实行人在画面内存在自身运动（肢体/位移）；静止相机下树干、立柱等
+    景物框内像素几乎不变。仅当相机整体静止时启用评估；相机运动时自动
+    跳过（全局运动与局部运动无法区分）。当前只作用于 person 类。"""
+
+    def __init__(self, iou_thr=0.80, min_age=6, energy_thr=2.5, global_thr=3.5):
+        self.iou_thr, self.min_age = iou_thr, min_age
+        self.energy_thr, self.global_thr = energy_thr, global_thr
+        self.prev_gray = None
+        self.tracks = []   # [cls, conf, xy, energy_sum, count]
+
+    def update(self, dets, gray):
+        if self.prev_gray is None:
+            self.prev_gray = gray
+            return dets, []
+        gdiff = float(np.abs(gray.astype(np.int16) -
+                             self.prev_gray.astype(np.int16)).mean())
+        self.prev_gray = gray
+        if gdiff > self.global_thr:          # 相机在动 → 无法评估，全部放行
+            self.tracks = []
+            return dets, []
+
+        scenery = []
+        unmatched = list(dets)
+        new_tracks = []
+        for t in self.tracks:
+            best, best_iou = None, self.iou_thr
+            for d in unmatched:
+                if d[0] == t[0] and d[0] == "person":
+                    v = _iou(d[2], t[2])
+                    if v > best_iou:
+                        best, best_iou = d, v
+            if best is not None:
+                unmatched.remove(best)
+                x1, y1, x2, y2 = best[2]
+                m = 0.2                       # 收缩 20% 只看框内部（自身运动）
+                ix1, iy1 = int(x1 + (x2 - x1) * m), int(y1 + (y2 - y1) * m)
+                ix2, iy2 = int(x2 - (x2 - x1) * m), int(y2 - (y2 - y1) * m)
+                if ix2 > ix1 and iy2 > iy1:
+                    e = float(np.abs(gray[iy1:iy2, ix1:ix2].astype(np.int16) -
+                                     self.prev_gray[iy1:iy2, ix1:ix2].astype(np.int16)).mean())
+                else:
+                    e = 0.0
+                new_tracks.append([best[0], best[1], best[2],
+                                   t[3] + e, t[4] + 1])
+                if t[4] + 1 >= self.min_age and (t[3] + e) / (t[4] + 1) < self.energy_thr:
+                    scenery.append(best)
+        for d in unmatched:                   # 新轨迹从零累积
+            new_tracks.append([d[0], d[1], d[2], 0.0, 0])
+        self.tracks = new_tracks[-40:]
+        scenery_ids = {id(s) for s in scenery}
+        return [d for d in dets if not any(d is s for s in scenery)], scenery
+
+
 def auto_gamma(img, target=0.45):
     mean = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY).mean() / 255.0
     if mean >= 0.45:
@@ -83,23 +138,27 @@ def predict(model, img, tta=False):
 
 
 def mef_predict(model, img, min_votes=2):
-    """跨档投票融合：目标须在 ≥min_votes 档曝光中同时出现才保留。
-    车灯照出的树影等幻觉误检通常只在单档闪现，会被投票过滤；
-    真实目标跨档稳定，得以保留。min_votes=1 退化为旧的并集模式。"""
+    """跨档投票融合（v3）：目标须在 ≥min_votes 档曝光中同时出现；
+    框坐标按置信度加权平均——解决"取单档框导致位置标歪"的问题。"""
     per_level = [predict(model, gamma_img(img, g), tta=True) for g in GAMMA_LADDER]
     allb = sorted([b for lv in per_level for b in lv], key=lambda x: -x[1])
-    clusters = []   # [box, votes]
+    clusters = []
     for b in allb:
-        hit = None
         for c in clusters:
             if c[0][0] == b[0] and _iou(c[0][2], b[2]) > 0.45:
-                hit = c
+                c.append(b)
                 break
-        if hit:
-            hit[1] += 1
         else:
-            clusters.append([b, 1])
-    return [c[0] for c in clusters if c[1] >= min_votes]
+            clusters.append([b])
+    out = []
+    for c in clusters:
+        if len(c) < min_votes:
+            continue
+        top = c[0]
+        wsum = sum(x[1] for x in c) or 1.0
+        xy = [int(sum(x[2][k] * x[1] for x in c) / wsum) for k in range(4)]
+        out.append((top[0], top[1], xy))
+    return out
 
 
 def _iou(a, b):
@@ -178,9 +237,11 @@ def main():
     ap.add_argument("--min-hits", type=int, default=2,
                     help="时序过滤：目标须连续出现N个处理帧才显示（1=关闭）")
     ap.add_argument("--no-glare", action="store_true", help="关闭湿地反光/眩光几何抑制")
+    ap.add_argument("--no-motion", action="store_true", help="关闭静止景物行为过滤")
     ap.add_argument("--max-frames", type=int, default=0)
     ap.add_argument("--show", action="store_true")
     args = ap.parse_args()
+    args.motion_filter = not args.no_motion
 
     model = YOLO(os.path.join(os.environ.get("YOLO_W", ""), "yolo11n.pt")
                  if os.environ.get("YOLO_W") else
@@ -205,6 +266,8 @@ def main():
     last_base, last_ours, last_pb, last_po = [], [], 0, 0
     tf_base = TemporalFilter(min_hits=args.min_hits)
     tf_ours = TemporalFilter(min_hits=args.min_hits)
+    sf_base = StaticSceneryFilter()
+    sf_ours = StaticSceneryFilter()
     while True:
         ok, frame = cap.read()
         if not ok or (args.max_frames and fidx >= args.max_frames) \
@@ -220,6 +283,10 @@ def main():
             if not args.no_glare:                 # 几何先验：湿地反光/眩光抑制
                 last_base = suppress_glare_fp(last_base, W, H)
                 last_ours = suppress_glare_fp(last_ours, W, H)
+            if args.motion_filter:                # 行为过滤：静止景物(树干) vs 真人
+                gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+                last_base, sb = sf_base.update(last_base, gray)
+                last_ours, so = sf_ours.update(last_ours, gray)
             cb = np.mean([b[1] for b in last_base]) if last_base else 0.15
             co = np.mean([b[1] for b in last_ours]) if last_ours else 0.15
             last_pb = compute_pdi(bright, cb)
