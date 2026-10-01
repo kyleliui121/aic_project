@@ -163,21 +163,21 @@ python experiments/train_alt.py  --data ... --labels ... --model best.pt --out a
 python experiments/eval_matrix.py --models 基线=B0.pt 本方法=C4.pt --sets 夜晚=bdd_night.yaml ...
 ```
 
-## 参考文献
+## 参考文献（已逐条在线核验，2026-10）
 
-[1] Liu W. et al. Image-Adaptive YOLO for Object Detection in Adverse Weather Conditions. AAAI 2022.
-[2] Yin X. et al. PE-YOLO: Pyramid Enhancement Network for Dark Object Detection. ICANN 2023.
+[1] Liu W. et al. Image-Adaptive YOLO for Object Detection in Adverse Weather Conditions. AAAI 2022.（官方代码 github.com/wenyyu/Image-Adaptive-YOLO）
+[2] Yin X. et al. PE-YOLO: Pyramid Enhancement Network for Dark Object Detection. ICANN 2023. arXiv:2307.10953.（代码 github.com/XiangchenYin/PE-YOLO）
 [3] Guo C. et al. Zero-Reference Deep Curve Estimation for Low-Light Image Enhancement. CVPR 2020.
 [4] Ma L. et al. Toward Fast, Flexible, and Robust Low-Light Image Enhancement. CVPR 2022.
-[5] Loh Y.P. & Chan C.S. Getting to Know Low-light Images with the Exclusively Dark Dataset. CVPRW 2019.
-[6] Loh Y.P. & Chan C.S. Low-light Image Enhancement using Gaussian Process for Feature Retrieval. SPIC 2019.
-[7] Wang D. et al. Tent: Fully Test-Time Adaptation by Entropy Minimization. NeurIPS 2021.
-[8] Shu M. et al. Adversarial Differentiable Data Augmentation for Autonomous Driving. ICRA 2021.
+[5] Loh Y.P. & Chan C.S. Getting to Know Low-light Images with the Exclusively Dark Dataset. Computer Vision and Image Understanding, 178:30–42, 2019.
+[6] Loh Y.P. & Chan C.S. Low-light Image Enhancement using Gaussian Process for Features Retrieval. Signal Processing: Image Communication, 74:175–190, 2019.
+[7] Wang D. et al. Tent: Fully Test-Time Adaptation by Entropy Minimization. ICLR 2021. arXiv:2006.10726.
+[8] Shu M. et al. Adversarial Differentiable Data Augmentation for Autonomous Systems. ICRA 2021.
 [9] Yang Y. & Soatto S. FDA: Fourier Domain Adaptation for Semantic Segmentation. CVPR 2020.
-[10] Liu S. et al. Grounding DINO: Marrying DINO with Grounded Pre-Training for Open-Set Object Detection. ICCV 2023.
-[11] Ruan X. & Tang W. Fully Test-Time Adaptation for Object Detection. CVPR Workshops 2024.
-[12] CIE 88:2004. Guide for Lighting of Road Tunnels and Underpasses.
+[10] Liu S. et al. Grounding DINO: Marrying DINO with Grounded Pre-Training for Open-Set Object Detection. ECCV 2024. arXiv:2303.05499.
+[11] Ruan X. & Tang W. Fully Test-Time Adaptation for Object Detection. CVPR Workshops 2024, pp. 1038–1047.
+[12] CIE 88:2004. Guide for Lighting of Road Tunnels and Underpasses. International Commission on Illumination.
 [13] Yang et al. Why Does Driver Attention Abnormally Decrease? Transportation Research Part F, 2025.
-[14] Neural Exposure Fusion for High-Dynamic-Range Object Detection.（车载 HDR 曝光融合）
-[15] Alcantarilla P.F. et al. Night Time Vehicle Detection for Driving Assistance.（夜间车灯/眩光处理）
+[14] Onzon E., Bömer M., Mannan F., Heide F. Neural Exposure Fusion for High-Dynamic Range Object Detection. CVPR 2024.
+[15] Alcantarilla P.F. et al. Night Time Vehicle Detection for Driving Assistance LightBeam Controller. IEEE Intelligent Vehicles Symposium (IV), 2008.
 [16] Solovyev R. et al. Weighted Boxes Fusion: Ensembling Boxes from Different Object Detection Models. Image and Vision Computing, 2021.
