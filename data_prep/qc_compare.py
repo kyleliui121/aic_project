@@ -113,7 +113,7 @@ def main():
                 if not ok:
                     unconfirmed.append(lb)
 
-            # 追加疑似漏标（行尾 #auto 标记）
+            # 追加疑似漏标（纯YOLO格式——行尾不可带备注，labelImg会解析崩溃；审计信息进QC报告）
             added = 0
             if missing:
                 with open(txt, "a", encoding="utf-8") as f:
@@ -121,7 +121,7 @@ def main():
                         cx, cy = (xy[0] + xy[2]) / 2 / W, (xy[1] + xy[3]) / 2 / H
                         bw, bh = (xy[2] - xy[0]) / W, (xy[3] - xy[1]) / H
                         cid = names.index(name)
-                        f.write("%d %.6f %.6f %.6f %.6f %.2f #auto\n" % (cid, cx, cy, bw, bh, conf))
+                        f.write("%d %.6f %.6f %.6f %.6f\n" % (cid, cx, cy, bw, bh))
                         added += 1
             total_add += added
             total_sus += len(unconfirmed)
